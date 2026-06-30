@@ -23,6 +23,11 @@ as the sole owner of their own account and sees identical data, and a
 solo owner who never invites anyone sees the same single-user app they
 always did.
 
+### Changed
+
+- **Internal:** `src/middleware.ts` has been renamed to `src/proxy.ts` to follow the Next.js 16 file convention (the exported function is now `proxy` instead of `middleware`). No user-visible change.
+- **Build:** Turbopack's project root is now pinned to the wacrm directory in `next.config.ts`, so an unrelated `package-lock.json` in a parent directory (e.g. `$HOME`) no longer trips the auto-detection warning.
+
 ### Added
 
 - **Public REST API (`/api/v1`) — groundwork.** A scoped, revocable

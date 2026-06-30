@@ -1,4 +1,23 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { NextConfig } from "next";
+
+/**
+ * Pin Turbopack's filesystem root to this directory.
+ *
+ * Turbopack auto-detects the project root by walking up from CWD
+ * looking for a lockfile. If a parent directory also has one (common
+ * when a developer has unrelated experiments under $HOME), Turbopack
+ * picks the outer one and emits a "multiple lockfiles" warning while
+ * quietly using the wrong root. Setting `turbopack.root` explicitly
+ * silences the warning and makes the choice obvious to anyone reading
+ * the config.
+ *
+ * `import.meta.url` resolves to this file's path, so this is robust
+ * to the project being run from any CWD.
+ */
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Baseline security headers applied to every response.
@@ -61,6 +80,9 @@ const SECURITY_HEADERS = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    root: projectRoot,
+  },
   /**
    * Cache-Control policy.
    *
