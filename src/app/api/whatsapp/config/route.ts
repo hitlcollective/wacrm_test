@@ -110,6 +110,41 @@ export async function GET() {
 
     if (configError) {
       console.error('Error fetching whatsapp_config:', configError)
+      // Detect the specific PostgREST "column does not exist" /
+      // "column not in schema cache" error codes. This happens
+      // when the operator upgraded wacrm but forgot to apply the
+      // 027_evolution_provider.sql migration. Without this
+      // detection, the error falls through to the generic
+      // 'db_error' reason — and the UI's "no_config" fallback
+      // surfaces as the misleading "Your profile is not linked
+      // to an account." message.
+      //   - PGRST204: PostgREST schema-cache miss
+      //   - 42703:    Postgres "undefined_column"
+      //   - '42703'  / 'PGRST204' sometimes appear in `.code` or
+      //     inside the `.message` string depending on the
+      //     supabase-js version; check both.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ce: any = configError
+      const code: string | undefined = ce?.code ?? ce?.details?.code
+      const msg: string = typeof ce?.message === 'string' ? ce.message : ''
+      const isSchemaError =
+        code === 'PGRST204' ||
+        code === '42703' ||
+        msg.includes('PGRST204') ||
+        msg.includes('42703') ||
+        msg.includes('does not exist') ||
+        msg.includes('column')
+      if (isSchemaError) {
+        return NextResponse.json(
+          {
+            connected: false,
+            reason: 'migration_required',
+            message:
+              'Database schema is out of date. Run supabase/migrations/027_evolution_provider.sql against your Supabase project, then restart the dev server.',
+          },
+          { status: 200 }
+        )
+      }
       return NextResponse.json(
         { connected: false, reason: 'db_error', message: 'Failed to fetch configuration' },
         { status: 200 }
