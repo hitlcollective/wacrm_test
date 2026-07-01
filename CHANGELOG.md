@@ -30,6 +30,22 @@ always did.
 
 ### Added
 
+- **Evolution API integration.** Settings → WhatsApp now offers a
+  provider toggle (Meta Cloud API or self-hosted Evolution). Picking
+  Evolution reveals a new "Connect with Evolution" card: type a
+  Base URL, click "Create + Pair", scan the QR with your phone,
+  and the integration is live. The card polls the connection
+  state every 3s and auto-saves once the phone is paired.
+  Disconnect cleanly tears down the instance on Evolution and
+  clears the local config. Operators who self-host Evolution
+  no longer need the Meta Business onboarding gauntlet.
+  **Migration required:** apply
+  `supabase/migrations/027_evolution_provider.sql`. Optional env
+  vars: `EVOLUTION_GLOBAL_APIKEY` (server-side, required for the
+  card to function), `NEXT_PUBLIC_EVOLUTION_DEFAULT_BASE_URL`
+  (pre-fills the Base URL input). See the `### Added` for the
+  previous PR (PR 1) for the provider abstraction that powers this.
+
 - **Public REST API (`/api/v1`) — groundwork.** A scoped, revocable
   **API key** system so you can drive wacrm from your own scripts and
   automations. Create keys under **Settings → API keys** (admin+),

@@ -22,6 +22,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { SettingsPanelHead } from './settings-panel-head';
+import { EvolutionConnectCard } from './evolution-connect-card';
 import {
   Accordion,
   AccordionItem,
@@ -34,6 +35,7 @@ const MASKED_TOKEN = '••••••••••••••••';
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
 type ResetReason = 'token_corrupted' | 'meta_api_error' | null;
+type Provider = 'meta' | 'evolution';
 
 export function WhatsAppConfig() {
   const supabase = createClient();
@@ -50,6 +52,12 @@ export function WhatsAppConfig() {
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [config, setConfig] = useState<WhatsAppConfigType | null>(null);
+  // Which provider the operator has chosen in the toggle.
+  // Defaults to whatever the saved config's provider is, or 'meta'
+  // if no row exists. When the user switches providers AND has an
+  // existing config for the other one, the toggle confirms
+  // before discarding their credentials.
+  const [selectedProvider, setSelectedProvider] = useState<Provider>('meta');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -169,6 +177,26 @@ export function WhatsAppConfig() {
     }
     fetchConfig(accountId);
   }, [authLoading, profileLoading, user, accountId, fetchConfig]);
+
+  // Sync the provider toggle with whatever the saved row says.
+  // Pre-existing Meta users land on the Meta form; pre-existing
+  // Evolution users land on the Evolution card. New accounts
+  // default to Meta.
+  useEffect(() => {
+    if (config) {
+      setSelectedProvider(((config as any).provider ?? 'meta') as Provider)
+    }
+  }, [config])
+
+  // Sync the provider toggle with whatever the saved row says.
+  // Pre-existing Meta users land on the Meta form; pre-existing
+  // Evolution users land on the Evolution card. New accounts
+  // default to Meta.
+  useEffect(() => {
+    if (config) {
+      setSelectedProvider(((config as any).provider ?? 'meta') as Provider)
+    }
+  }, [config])
 
   async function handleSave() {
     if (!phoneNumberId.trim()) {
@@ -375,12 +403,59 @@ export function WhatsAppConfig() {
 
   const showResetBanner = resetReason === 'token_corrupted';
 
+  const handleProviderSwitch = (next: Provider) => {
+    if (next === selectedProvider) return
+    const other = next === 'meta' ? 'evolution' : 'meta'
+    const hasOther =
+      config && ((config as any).provider ?? 'meta') === other
+    if (hasOther) {
+      const label = other === 'meta' ? 'Meta' : 'Evolution'
+      const ok = confirm(
+        `Switching providers will hide your current ${label} configuration from this view. ` +
+          'You can switch back any time without losing data.',
+      )
+      if (!ok) return
+    }
+    setSelectedProvider(next)
+  }
+
   return (
     <section className="animate-in fade-in-50 duration-200">
       <SettingsPanelHead
         title="WhatsApp connection"
-        description="Connect your Meta WhatsApp Business API. Credentials, webhook, and setup steps all live here."
+        description="Connect via Meta Cloud API or a self-hosted Evolution server. Pick a provider below."
+        action={
+          <div className="inline-flex items-center rounded-lg border border-border bg-muted/40 p-0.5">
+            <button
+              type="button"
+              onClick={() => handleProviderSwitch('meta')}
+              className={
+                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors ' +
+                (selectedProvider === 'meta'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground')
+              }
+            >
+              Meta
+            </button>
+            <button
+              type="button"
+              onClick={() => handleProviderSwitch('evolution')}
+              className={
+                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors ' +
+                (selectedProvider === 'evolution'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground')
+              }
+            >
+              Evolution
+            </button>
+          </div>
+        }
       />
+      {selectedProvider === 'evolution' ? (
+        <EvolutionConnectCard />
+      ) : (
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
       <div className="space-y-6">
@@ -841,6 +916,7 @@ export function WhatsAppConfig() {
         </Card>
       </div>
     </div>
+      )}
     </section>
   );
 }
