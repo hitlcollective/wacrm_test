@@ -4,25 +4,34 @@ import {
   EvolutionLifecycleClient,
   EvolutionLifecycleError,
 } from '@/lib/whatsapp/evolution/instance-client'
+import { encrypt } from '@/lib/whatsapp/encryption'
 import crypto from 'crypto'
 
 /**
  * POST /api/whatsapp/evolution/instance
  *
- * Creates a new Evolution instance for the caller's account and
- * registers the wacrm inbound webhook URL with Evolution. The
- * response carries the per-instance apikey; the UI then persists
- * it via /api/whatsapp/config (provider=evolution).
+ * Creates a new Evolution instance for the caller's account,
+ * registers the wacrm inbound webhook URL with Evolution, AND
+ * upserts the whatsapp_config row so that the subsequent
+ * /qr and /status polls have a config to read from.
  *
- * Why a separate config step: storing the apikey on the
- * whatsapp_config row is the source of truth, and the same
- * upsert path is shared with Meta. Keeps the contract uniform.
+ * Why we persist here (not in /api/whatsapp/config): the
+ * polling routes (qr + status) look up the config by
+ * account_id and return 404 if no row exists. The previous
+ * design deferred the save to a later step, which left the
+ * UI in a permanent 404 loop until the phone was paired.
+ * Saving here unblocks the polling immediately.
  *
- * Why register the webhook here (not in the config route): the
- * webhook URL needs the apikey for the webhook secret lookup,
- * and the apikey is the thing the user is in the middle of
- * creating. Bundling the two keeps the UI flow to a single
- * "Create + Pair" click.
+ * Schema note: whatsapp_config still has `user_id NOT NULL`
+ * and `access_token NOT NULL` (both legacy from migration 001).
+ * The multi-tenant column is `account_id` (added in 017).
+ * Evolution rows set:
+ *   - user_id: same as the connecting user (RLS requirement)
+ *   - account_id: the new multi-tenant key
+ *   - access_token: empty string (the column is NOT NULL but
+ *     meaningless for Evolution rows — the per-instance key
+ *     is in `evolution_apikey`)
+ *   - phone_number_id: NULL (nullable since migration 027)
  */
 
 async function resolveAccountId(
@@ -36,6 +45,79 @@ async function resolveAccountId(
     .maybeSingle()
   if (error || !data?.account_id) return null
   return data.account_id as string
+}
+
+/**
+ * Upsert the Evolution config onto whatsapp_config.
+ * The apikey and webhook secret are stored encrypted via
+ * the shared encryption helper (matches the Meta path).
+ */
+async function persistEvolutionConfig(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  accountId: string,
+  baseUrl: string,
+  instanceName: string,
+  apikey: string,
+  webhookSecret: string,
+): Promise<{ ok: boolean; error?: string }> {
+  let encryptedApikey: string
+  let encryptedSecret: string
+  try {
+    encryptedApikey = encrypt(apikey)
+    encryptedSecret = encrypt(webhookSecret)
+  } catch (e) {
+    return {
+      ok: false,
+      error: `encryption failed: ${e instanceof Error ? e.message : String(e)}`,
+    }
+  }
+
+  // Read existing row to decide insert vs update.
+  const { data: existing } = await supabase
+    .from('whatsapp_config')
+    .select('id')
+    .eq('account_id', accountId)
+    .maybeSingle()
+
+  // `evolution_connection_state` is the rich 5-value Evolution
+  // state machine (qr_pending / connecting / connected /
+  // disconnected / banned). The legacy top-level `status`
+  // column is binary ('connected' | 'disconnected') — its
+  // CHECK constraint rejects anything else. Until /status is
+  // polled and Evolution reports `state === 'open'`, the
+  // binary is 'disconnected'.
+  const patch = {
+    provider: 'evolution',
+    evolution_base_url: baseUrl,
+    evolution_instance_name: instanceName,
+    evolution_apikey: encryptedApikey,
+    evolution_webhook_url_secret: encryptedSecret,
+    evolution_connection_state: 'connecting',
+    status: 'disconnected',
+    updated_at: new Date().toISOString(),
+  }
+
+  const { error } = existing
+    ? await supabase
+        .from('whatsapp_config')
+        .update(patch)
+        .eq('account_id', accountId)
+    : await supabase.from('whatsapp_config').insert({
+        // Legacy NOT NULL columns (kept for backward compat with
+        // the RLS policy `auth.uid() = user_id`).
+        user_id: userId,
+        access_token: '', // NOT NULL but meaningless for Evolution
+        // New multi-tenant key (017).
+        account_id: accountId,
+        // phone_number_id is nullable since migration 027.
+        ...patch,
+      })
+
+  if (error) {
+    return { ok: false, error: error.message }
+  }
+  return { ok: true }
 }
 
 export async function POST(request: Request) {
@@ -95,16 +177,59 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: message }, { status: 502 })
     }
 
+    // Fail fast: if the lifecycle client could not extract an
+    // apikey from the Evolution response, the UI will only
+    // discover the problem three minutes later when the status
+    // poll flips to 'open' and /api/whatsapp/config rejects the
+    // empty apikey. Better to surface the error NOW, at Connect
+    // time, so the operator can debug without scanning a QR
+    // first. The lifecycle client already logs a diagnostic
+    // line on the server side — the operator should look in
+    // the dev-server terminal for "could not find an apikey".
+    if (!created.apikey) {
+      console.error(
+        '[evolution/instance POST] Evolution returned no apikey. ' +
+          'instanceName=' +
+          created.instanceName,
+      )
+      // Delete the half-created instance so it doesn't sit
+      // around as an orphan on the Evolution server.
+      try {
+        await client.deleteInstance(created.instanceName)
+      } catch (cleanupErr) {
+        console.warn(
+          '[evolution/instance POST] cleanup delete failed:',
+          cleanupErr,
+        )
+      }
+      return NextResponse.json(
+        {
+          error:
+            'Evolution did not return an apikey for the new instance. ' +
+            'Check the wacrm server logs (search for "could not find an apikey") ' +
+            'for the response shape — your Evolution version may need a newer wacrm release.',
+        },
+        { status: 502 },
+      )
+    }
+
     // Register the inbound webhook URL. The path uses a per-account
     // secret that we mint and persist; the inbound route checks
     // `?secret=…` against this. The secret is stored encrypted
     // alongside the apikey.
     const webhookSecret = crypto.randomBytes(24).toString('base64url')
     const origin = process.env.NEXT_PUBLIC_APP_URL ?? ''
+    // The secret MUST be in the URL — the wacrm inbound route
+    // (`/api/whatsapp/evolution/webhook/route.ts`) reads
+    // `?secret=…` and compares it (constant-time) against the
+    // encrypted value on the matching whatsapp_config row.
+    // Without it, Evolution's POSTs land in wacrm with no
+    // auth and the route returns 401 to every event.
     const webhookUrl = origin
-      ? `${origin.replace(/\/$/, '')}/api/whatsapp/evolution/webhook`
+      ? `${origin.replace(/\/$/, '')}/api/whatsapp/evolution/webhook?secret=${webhookSecret}`
       : ''
 
+    let webhookRegistered = false
     if (webhookUrl) {
       try {
         await client.registerWebhook({
@@ -112,11 +237,8 @@ export async function POST(request: Request) {
           url: webhookUrl,
           secret: webhookSecret,
         })
+        webhookRegistered = true
       } catch (err) {
-        // Non-fatal — the instance was created, the user can pair
-        // the phone, and wacrm will just not receive events until
-        // the webhook is re-registered. Surface the failure so the
-        // UI can call it out.
         const message =
           err instanceof EvolutionLifecycleError
             ? err.message
@@ -127,15 +249,33 @@ export async function POST(request: Request) {
           '[evolution/instance POST] webhook register failed:',
           message,
         )
-        return NextResponse.json({
-          instanceName: created.instanceName,
-          apikey: created.apikey,
-          webhookSecret,
-          baseUrl,
-          webhookRegistered: false,
-          warning: `Instance created but webhook could not be registered: ${message}. Re-save the configuration after the operator checks the Evolution server URL.`,
-        })
+        // Non-fatal — continue and persist config; the UI will
+        // surface a warning so the operator can re-register.
       }
+    }
+
+    // Persist the config to whatsapp_config so the polling
+    // routes (/qr, /status) can find it.
+    const persistResult = await persistEvolutionConfig(
+      supabase,
+      user.id,
+      accountId,
+      baseUrl,
+      created.instanceName,
+      created.apikey,
+      webhookSecret,
+    )
+    if (!persistResult.ok) {
+      console.error(
+        '[evolution/instance POST] failed to persist config:',
+        persistResult.error,
+      )
+      return NextResponse.json(
+        {
+          error: `Instance was created on Evolution, but wacrm could not save the config: ${persistResult.error}. The instance is still active on Evolution — re-save the configuration in Settings to retry.`,
+        },
+        { status: 500 },
+      )
     }
 
     return NextResponse.json({
@@ -143,7 +283,7 @@ export async function POST(request: Request) {
       apikey: created.apikey,
       webhookSecret,
       baseUrl,
-      webhookRegistered: Boolean(webhookUrl),
+      webhookRegistered,
     })
   } catch (err) {
     console.error('evolution/instance POST unexpected error:', err)

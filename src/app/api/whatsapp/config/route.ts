@@ -664,15 +664,24 @@ async function handleEvolutionPost(
     // Clear Meta-only columns so the row is unambiguous.
     phone_number_id: null,
     waba_id: null,
-    access_token: null,
+    // access_token is NOT NULL on the column (legacy Meta shape).
+    // Evolution doesn't use it; the meaningful token is
+    // evolution_apikey. Use empty string to satisfy the NOT NULL
+    // constraint without bringing back a stale Meta token.
+    access_token: '',
     verify_token: null,
     registered_at: null,
     subscribed_apps_at: null,
     last_registration_error: null,
-    // The UI is about to call /status which will set the real
-    // state — mark as "connecting" optimistically so banners
-    // don't briefly show "disconnected".
-    status: 'connecting' as const,
+    // The legacy top-level `status` column is binary
+    // ('connected' | 'disconnected') — its CHECK constraint
+    // rejects 'connecting'. The optimistic "connecting" state
+    // is held in `evolution_connection_state` below, which is
+    // the column the UI reads for the connection badge.
+    // /status will flip both to 'connected' once Evolution
+    // reports state === 'open'.
+    status: 'disconnected' as const,
+    evolution_connection_state: 'connecting' as const,
     connected_at: null,
     updated_at: new Date().toISOString(),
   }

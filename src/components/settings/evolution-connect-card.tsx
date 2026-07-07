@@ -93,6 +93,7 @@ export function EvolutionConnectCard() {
   const [status, setStatus] = useState<StatusResponse | null>(null)
   const [state, setState] = useState<ConnectionState>('idle')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [reRegistering, setReRegistering] = useState(false)
 
   // Refs to manage the polling loops and cancellation
   const qrTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -162,7 +163,19 @@ export function EvolutionConnectCard() {
       setStatus(payload)
       // When the phone is paired, save the config and stop
       // polling. The card switches to the "connected" view.
-      if (payload.state === 'open') {
+      //
+      // Guard with `state !== 'saving' && state !== 'connected'`
+      // so we don't re-enter saveConfig on every subsequent
+      // poll. Once we start saving (or finish connected / fail
+      // into error), the effect's cleanup in stopPolling()
+      // tears down the timer; the guard here is belt-and-braces
+      // for any future refactor that removes that cleanup.
+      if (
+        payload.state === 'open' &&
+        state !== 'saving' &&
+        state !== 'connected' &&
+        state !== 'error'
+      ) {
         await saveConfig(createResp)
       }
     } catch (err) {
@@ -339,6 +352,47 @@ export function EvolutionConnectCard() {
   }
 
   // ============================================================
+  // Re-register webhook
+  //
+  // The connect flow silently skips Evolution's `webhook/set` call
+  // when NEXT_PUBLIC_APP_URL is unset at pair time — the instance
+  // is created and the row is saved, but Evolution is never told
+  // where to POST events, so the inbox stays silent. Setting the
+  // env var + restarting does NOT auto-heal: Evolution still has
+  // the old (empty) webhook URL. This button calls the recovery
+  // endpoint to push the current NEXT_PUBLIC_APP_URL + the
+  // already-persisted secret back to Evolution.
+  // ============================================================
+  async function handleReregisterWebhook() {
+    setReRegistering(true)
+    try {
+      const res = await fetch('/api/whatsapp/evolution/instance/webhook', {
+        method: 'POST',
+      })
+      const data = (await res.json()) as
+        | { webhookRegistered: true; url: string }
+        | { error: string }
+      if (!res.ok || 'error' in data) {
+        const message =
+          'error' in data
+            ? data.error
+            : 'Failed to re-register Evolution webhook'
+        toast.error(message, { duration: 10000 })
+        return
+      }
+      toast.success('Evolution webhook re-registered. Inbound events should resume shortly.', {
+        duration: 10000,
+      })
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 're-register failed'
+      toast.error(message, { duration: 10000 })
+    } finally {
+      setReRegistering(false)
+    }
+  }
+
+  // ============================================================
   // Render
   // ============================================================
 
@@ -384,14 +438,34 @@ export function EvolutionConnectCard() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Button
-              variant="outline"
-              onClick={handleDisconnect}
-              className="border-red-900 text-red-400 hover:text-red-300 hover:bg-red-950/40"
-            >
-              <PowerOff className="size-4" />
-              Disconnect Evolution
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={handleReregisterWebhook}
+                disabled={reRegistering}
+                className="border-border text-foreground"
+              >
+                {reRegistering ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-4" />
+                )}
+                {reRegistering ? 'Re-registering…' : 'Re-register webhook'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleDisconnect}
+                className="border-red-900 text-red-400 hover:text-red-300 hover:bg-red-950/40"
+              >
+                <PowerOff className="size-4" />
+                Disconnect Evolution
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
+              If inbound messages stopped arriving after a server
+              move or env change, re-registering the webhook re-points
+              Evolution at this wacrm install.
+            </p>
           </CardContent>
         </Card>
       </div>

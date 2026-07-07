@@ -55,7 +55,11 @@ describe('EvolutionLifecycleClient.createInstance', () => {
   it('POSTs to /instance/create with the right headers and an auto-generated instance name', async () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse(201, {
-        instance: { instanceName: 'wacrm-abc-12' },
+        // No `instance.instanceName` here — the test wants to
+        // verify the auto-generated name is what reaches
+        // Evolution in the request body. (If a future test wants
+        // to assert the echo-back behaviour, that's a separate
+        // test.)
         hash: { apikey: 'instance-apikey-1', hash: 'h' },
       }),
     )
@@ -96,6 +100,49 @@ describe('EvolutionLifecycleClient.createInstance', () => {
     const r = await client.createInstance({ instanceName: 'x' })
     expect(r.apikey).toBe('top-level-key')
     expect(r.hash).toBe('top-level-hash')
+  })
+
+  it('reads the apikey from the canonical Evolution v2 nested shape (instance.apikey)', async () => {
+    // This is the real-world shape most Evolution v2 installs
+    // return today. The apikey lives under `instance`, NOT under
+    // `hash` and NOT at the top level. Missing this is what
+    // produced the original "base_url, instance_name, and apikey
+    // are required" error at config-save time — the create flow
+    // looked fine because the UI doesn't display the apikey, but
+    // /api/whatsapp/config rejects the empty string at save.
+    fetchMock.mockResolvedValueOnce(
+      mockResponse(201, {
+        instance: {
+          instanceName: 'wacrm-v2',
+          instanceId: 'iid-1',
+          status: 'connecting',
+          apikey: 'v2-instance-apikey',
+          token: 'v2-instance-token-ignored',
+        },
+        hash: 'plain-hash-string',
+        qrcode: 'ignored-for-create',
+      }),
+    )
+    const client = makeClient()
+    const r = await client.createInstance()
+    expect(r.apikey).toBe('v2-instance-apikey')
+    expect(r.hash).toBe('plain-hash-string')
+  })
+
+  it('falls back to instance.token when apikey is absent (some v2 builds)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse(201, {
+        instance: {
+          instanceName: 'wacrm-token',
+          token: 'fallback-token',
+        },
+        hash: 'h2',
+      }),
+    )
+    const client = makeClient()
+    const r = await client.createInstance()
+    expect(r.apikey).toBe('fallback-token')
+    expect(r.hash).toBe('h2')
   })
 
   it('passes the number through to Evolution when provided', async () => {
@@ -264,10 +311,11 @@ describe('EvolutionLifecycleClient.registerWebhook', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const init = (fetchMock.mock.calls[0] as any)[1]
     const body = JSON.parse(init.body)
-    expect(body.url).toBe('https://wacrm.example.com/api/whatsapp/evolution/webhook')
-    expect(body.webhook_by_events).toBe(false)
-    expect(body.webhook_base64).toBe(false)
-    expect(body.events).toEqual([
+    expect(body.webhook.enabled).toBe(true)
+    expect(body.webhook.url).toBe('https://wacrm.example.com/api/whatsapp/evolution/webhook')
+    expect(body.webhook.webhook_by_events).toBe(false)
+    expect(body.webhook.webhook_base64).toBe(false)
+    expect(body.webhook.events).toEqual([
       'MESSAGES_UPSERT',
       'MESSAGES_UPDATE',
       'CONNECTION_UPDATE',
@@ -286,7 +334,7 @@ describe('EvolutionLifecycleClient.registerWebhook', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const init = (fetchMock.mock.calls[0] as any)[1]
     const body = JSON.parse(init.body)
-    expect(body.events).toEqual(['MESSAGES_UPSERT'])
+    expect(body.webhook.events).toEqual(['MESSAGES_UPSERT'])
   })
 })
 
