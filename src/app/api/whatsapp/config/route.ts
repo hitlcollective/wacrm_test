@@ -110,6 +110,41 @@ export async function GET() {
 
     if (configError) {
       console.error('Error fetching whatsapp_config:', configError)
+      // Detect the specific PostgREST "column does not exist" /
+      // "column not in schema cache" error codes. This happens
+      // when the operator upgraded wacrm but forgot to apply the
+      // 027_evolution_provider.sql migration. Without this
+      // detection, the error falls through to the generic
+      // 'db_error' reason — and the UI's "no_config" fallback
+      // surfaces as the misleading "Your profile is not linked
+      // to an account." message.
+      //   - PGRST204: PostgREST schema-cache miss
+      //   - 42703:    Postgres "undefined_column"
+      //   - '42703'  / 'PGRST204' sometimes appear in `.code` or
+      //     inside the `.message` string depending on the
+      //     supabase-js version; check both.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ce: any = configError
+      const code: string | undefined = ce?.code ?? ce?.details?.code
+      const msg: string = typeof ce?.message === 'string' ? ce.message : ''
+      const isSchemaError =
+        code === 'PGRST204' ||
+        code === '42703' ||
+        msg.includes('PGRST204') ||
+        msg.includes('42703') ||
+        msg.includes('does not exist') ||
+        msg.includes('column')
+      if (isSchemaError) {
+        return NextResponse.json(
+          {
+            connected: false,
+            reason: 'migration_required',
+            message:
+              'Database schema is out of date. Run supabase/migrations/027_evolution_provider.sql against your Supabase project, then restart the dev server.',
+          },
+          { status: 200 }
+        )
+      }
       return NextResponse.json(
         { connected: false, reason: 'db_error', message: 'Failed to fetch configuration' },
         { status: 200 }
@@ -629,15 +664,24 @@ async function handleEvolutionPost(
     // Clear Meta-only columns so the row is unambiguous.
     phone_number_id: null,
     waba_id: null,
-    access_token: null,
+    // access_token is NOT NULL on the column (legacy Meta shape).
+    // Evolution doesn't use it; the meaningful token is
+    // evolution_apikey. Use empty string to satisfy the NOT NULL
+    // constraint without bringing back a stale Meta token.
+    access_token: '',
     verify_token: null,
     registered_at: null,
     subscribed_apps_at: null,
     last_registration_error: null,
-    // The UI is about to call /status which will set the real
-    // state — mark as "connecting" optimistically so banners
-    // don't briefly show "disconnected".
-    status: 'connecting' as const,
+    // The legacy top-level `status` column is binary
+    // ('connected' | 'disconnected') — its CHECK constraint
+    // rejects 'connecting'. The optimistic "connecting" state
+    // is held in `evolution_connection_state` below, which is
+    // the column the UI reads for the connection badge.
+    // /status will flip both to 'connected' once Evolution
+    // reports state === 'open'.
+    status: 'disconnected' as const,
+    evolution_connection_state: 'connecting' as const,
     connected_at: null,
     updated_at: new Date().toISOString(),
   }

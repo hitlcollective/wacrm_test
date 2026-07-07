@@ -97,10 +97,19 @@ export async function GET() {
     const client = new EvolutionLifecycleClient({ baseUrl, globalApiKey })
     try {
       const qr = await client.getQr(instanceName)
-      return NextResponse.json({
-        pairingCode: qr.pairingCode ?? qr.base64 ?? null,
-        count: qr.count,
-      })
+      // Evolution v2 returns `pairingCode` as a full data URL
+      // (e.g. "data:image/png;base64,iVBORw…") in some
+      // versions and as a bare base64 string in others. The UI
+      // prepends "data:image/png;base64," unconditionally, so a
+      // non-stripped value produces a doubled-prefix URL that
+      // the browser rejects with net::ERR_INVALID_URL. Normalise
+      // to bare base64 here — the UI's template literal does the
+      // right thing on the other end.
+      const raw = qr.pairingCode ?? qr.base64 ?? null
+      const pairingCode = raw
+        ? raw.replace(/^data:image\/[a-z+]+;base64,/i, '')
+        : null
+      return NextResponse.json({ pairingCode, count: qr.count })
     } catch (err) {
       if (err instanceof EvolutionLifecycleError) {
         // 404 from Evolution means the instance is gone (operator

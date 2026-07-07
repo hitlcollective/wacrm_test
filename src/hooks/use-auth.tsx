@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useCallback,
   useMemo,
@@ -62,6 +63,16 @@ interface AuthContextValue {
    * and may take the "not opted in" branch incorrectly.
    */
   profileLoading: boolean;
+  /**
+   * Last error from the profile fetch, if any. Set when the
+   * SELECT against `profiles` failed (schema drift, network
+   * error, etc.) and the hook has nothing to show the user.
+   * Cleared on a successful re-fetch.
+   *  - 'schema': column mismatch — the operator is behind on
+   *    migrations. Includes a remediation message.
+   *  - 'db':     any other failure (network, RLS, etc.)
+   */
+  profileError: { kind: 'schema' | 'db'; message: string } | null;
   signOut: () => Promise<void>;
   /** Re-fetch the current user's profile row — call after a save from
    *  the settings form so header/sidebar reflect the change without a
@@ -120,6 +131,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // settles later. Callers that gate on `profile.*` need to know which
   // window they're in — see the type doc above.
   const [profileLoading, setProfileLoading] = useState(true);
+  // Last profile-fetch error, if any. See the type doc on
+  // `profileError` in AuthContextValue above.
+  const [profileError, setProfileError] = useState<
+    { kind: 'schema' | 'db'; message: string } | null
+  >(null);
+  // Latch so the schema-error toast fires exactly once per page
+  // load — without this, every auth-state-change tick would
+  // re-fire while the operator is reading.
+  const hasToastedSchemaErrorRef = useRef(false);
 
   // Shared across init, auth-state-change listener, and the exposed
   // refreshProfile() callback. Reads the current session's user id and
@@ -143,10 +163,58 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           hint: error.hint,
           code: error.code,
         });
+        // Detect PostgREST column-not-found codes that signal
+        // schema drift. PGRST204 = "column not in schema cache"
+        // (cache stale after a migration); 42703 =
+        // "undefined_column" (column genuinely missing —
+        // migration never applied). We check both `.code` (newer
+        // supabase-js puts it here) and `.message` (older
+        // versions only), so the heuristic survives library
+        // upgrades. Mirrors the same detector in
+        // /api/whatsapp/config GET.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ce: any = error;
+        const code: string | undefined = ce?.code ?? ce?.details?.code;
+        const msg: string = typeof ce?.message === 'string' ? ce.message : '';
+        const isSchemaError =
+          code === 'PGRST204' ||
+          code === '42703' ||
+          msg.includes('PGRST204') ||
+          msg.includes('42703') ||
+          msg.includes('does not exist') ||
+          (msg.includes('column') && msg.includes('schema cache'));
+        if (isSchemaError) {
+          const reason = {
+            kind: 'schema' as const,
+            message:
+              'Database schema is out of date. Apply the missing migrations in supabase/migrations/ (start with 017_account_sharing.sql and re-apply every file with a higher number), then restart the dev server.',
+          };
+          setProfileError(reason);
+          if (!hasToastedSchemaErrorRef.current) {
+            hasToastedSchemaErrorRef.current = true;
+            try {
+              // Lazy-require sonner so server components don't
+              // pay for it. toast is the same Toaster the rest
+              // of the app uses (see src/components/themed-toaster.tsx).
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { toast } = require('sonner');
+              toast.error('Schema out of date', {
+                description: reason.message,
+                duration: 30000,
+              });
+            } catch {
+              /* sonner not available — the state still surfaces in chrome */
+            }
+          }
+        } else {
+          setProfileError({ kind: 'db', message: msg || 'fetchProfile failed' });
+        }
         return;
       }
 
       if (data) {
+        setProfileError(null);
+        hasToastedSchemaErrorRef.current = false;
         // Load the account with a plain lookup by id instead of an
         // embedded FK join. The embed (`account:accounts!inner(...)`)
         // forces PostgREST to resolve the profiles.account_id →
@@ -326,6 +394,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profile,
         loading,
         profileLoading,
+        profileError,
         signOut,
         refreshProfile,
         account,
@@ -354,6 +423,7 @@ export function useAuth(): AuthContextValue {
       profile: null,
       loading: false,
       profileLoading: false,
+      profileError: null,
       signOut: async () => {
         window.location.href = "/login";
       },

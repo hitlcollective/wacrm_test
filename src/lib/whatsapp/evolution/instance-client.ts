@@ -13,7 +13,7 @@
  *   GET    /instance/connect/{name}         — { pairingCode, base64, count }
  *   GET    /instance/connectionState/{name} — { instance: { state, ownerJid } }
  *   DELETE /instance/delete/{name}          — empty 200
- *   POST   /webhook/set/{name}              — { url, webhook_by_events, events, webhook_base64? }
+ *   POST   /webhook/set/{name}              — { webhook: { enabled, url, webhook_by_events, events, webhook_base64? } }
  *
  * Why a separate client from the provider:
  *   The provider carries an apikey + baseUrl that the customer pastes
@@ -114,6 +114,15 @@ type AnyResponse = Record<string, unknown> & {
     connectionStatus?: string
     ownerJid?: string | null
     jid?: string | null
+    /** Real Evolution v2 nests the apikey under `instance`. */
+    apikey?: string
+    /** Some v2 builds expose it as `token` instead. */
+    token?: string
+    /** Some v2 builds echo the slug under `instance` (not just
+     *  at the top level). We don't currently use it (we sent the
+     *  name ourselves in the request body) but typed for
+     *  future-proofing. */
+    instanceName?: string
   }
   state?: string
   connectionStatus?: string
@@ -121,6 +130,65 @@ type AnyResponse = Record<string, unknown> & {
   jid?: string | null
   response?: { message?: string | string[] }
   message?: string | string[]
+}
+
+/**
+ * Walk an unknown response object and return the first string
+ * value whose key looks like an apikey/token holder. Used as
+ * a last-resort fallback when the canonical paths all miss
+ * (which would otherwise leave the customer stuck on a 'no
+ * apikey' error). We only inspect two levels deep so a
+ * pathological deep object doesn't burn CPU.
+ */
+function findApikeyByKeyName(obj: unknown): string | null {
+  if (!obj || typeof obj !== 'object') return null
+  const KEY_RE = /apikey|api[_-]?key|secret|token/i
+  const stack: unknown[] = [obj]
+  let depth = 0
+  while (stack.length && depth < 4) {
+    depth++
+    const next = stack.shift()
+    if (!next || typeof next !== 'object') continue
+    for (const [k, v] of Object.entries(next as Record<string, unknown>)) {
+      if (typeof v === 'string' && v.length >= 8 && KEY_RE.test(k)) {
+        return v
+      }
+      if (v && typeof v === 'object') stack.push(v)
+    }
+  }
+  return null
+}
+
+/**
+ * Recursively summarise an unknown response by listing the
+ * keys at each nesting level. Used for the diagnostic
+ * console.warn above — we never include the values, so a
+ * redacted log line is safe to share.
+ */
+function summariseKeys(
+  obj: unknown,
+  depth = 0,
+  maxDepth = 3,
+): unknown {
+  if (depth > maxDepth) return '…'
+  if (obj === null || obj === undefined) return obj
+  if (Array.isArray(obj)) {
+    return obj.length <= 2
+      ? obj.map((v) => summariseKeys(v, depth + 1, maxDepth))
+      : `[…${obj.length} items]`
+  }
+  if (typeof obj !== 'object') return '?'
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      out[k] = summariseKeys(v, depth + 1, maxDepth)
+    } else if (Array.isArray(v)) {
+      out[k] = v.length <= 2 ? '[…]' : `[…${v.length}]`
+    } else {
+      out[k] = '?'
+    }
+  }
+  return out
 }
 
 export class EvolutionLifecycleClient {
@@ -148,18 +216,78 @@ export class EvolutionLifecycleClient {
     }
     const r = (await this.fetch('POST', '/instance/create', body)) as AnyResponse
     const hash = r.hash
+    // Several response shapes are seen in the wild across
+    // Evolution v1 / v2 and various forks. Pull from each in
+    // turn and pick the first non-empty string.
+    //
+    //   v1:         { apikey, hash }
+    //   v2 alt:     { hash: { apikey, hash } }            (some forks)
+    //   v2:         { instance: { apikey, token, ... },
+    //                  hash, qrcode }                     (canonical)
+    //   rare:       { auth: { token, apikey } }
+    //   rare:       { data: { apikey } }
+    //   rare:       { token } (hash IS the apikey)
+    //
+    // If we still find nothing, we walk the response for any
+    // field whose key looks like an apikey holder. This is a
+    // last resort — it only fires if none of the named paths
+    // matched.
+    const hashObj = typeof hash === 'object' && hash !== null ? hash : null
+    const authObj =
+      typeof r.auth === 'object' && r.auth !== null
+        ? (r.auth as Record<string, unknown>)
+        : null
+    const dataObj =
+      typeof r.data === 'object' && r.data !== null
+        ? (r.data as Record<string, unknown>)
+        : null
+
+    const candidates: unknown[] = [
+      hashObj?.apikey,
+      r.apikey,
+      r.instance?.apikey,
+      r.instance?.token,
+      authObj?.apikey,
+      authObj?.token,
+      dataObj?.apikey,
+      dataObj?.token,
+      // Some very old builds used the hash field as the apikey
+      // directly. Last-ditch fallback (only if it's plausibly
+      // long enough to be a key, not a short status hash).
+      typeof hash === 'string' && hash.length > 16 ? hash : undefined,
+    ]
+    let apikey = candidates.find(
+      (c) => typeof c === 'string' && c.length > 0,
+    ) as string | undefined
+
+    // Last-resort: walk the response for any key whose NAME
+    // suggests an apikey/token holder. We only do this if
+    // the named paths above all failed — it's noisy on
+    // well-formed responses.
+    if (!apikey) {
+      apikey = findApikeyByKeyName(r) ?? undefined
+    }
+
+    if (!apikey) {
+      // Diagnostic breadcrumb: tell us exactly which fields
+      // Evolution returned so we can add a new shape to the
+      // list above. We log KEYS only, never values, so we
+      // don't accidentally exfiltrate the apikey in shared
+      // logs.
+      console.warn(
+        '[EvolutionLifecycleClient.createInstance] ' +
+          'could not find an apikey in the response. ' +
+          'Response keys: ' +
+          JSON.stringify(summariseKeys(r)),
+      )
+    }
     return {
-      instanceName,
-      apikey:
-        (typeof hash === 'object' && hash !== null ? hash.apikey : undefined) ??
-        r.apikey ??
-        '',
+      instanceName: r.instance?.instanceName ?? instanceName,
+      apikey: apikey ?? '',
       hash:
         typeof hash === 'string'
           ? hash
-          : typeof hash === 'object' && hash !== null
-            ? hash.hash
-            : undefined,
+          : hashObj?.hash,
     }
   }
 
@@ -204,12 +332,15 @@ export class EvolutionLifecycleClient {
       'POST',
       `/webhook/set/${encodeURIComponent(args.instanceName)}`,
       {
-        url: args.url,
-        webhook_by_events: false,
-        // base64 off — we read raw JSON, the inbox renders inline
-        // media URLs that Evolution hands us.
-        webhook_base64: false,
-        events,
+        webhook: {
+          enabled: true,
+          url: args.url,
+          webhook_by_events: false,
+          // base64 off — we read raw JSON, the inbox renders inline
+          // media URLs that Evolution hands us.
+          webhook_base64: false,
+          events,
+        },
       },
     )
   }
