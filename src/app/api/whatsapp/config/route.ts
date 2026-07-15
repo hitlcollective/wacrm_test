@@ -267,18 +267,51 @@ async function handleEvolutionGet(
   try {
     const status = await client.getStatus(instanceName)
     const isOpen = status.state === 'open'
+    // Race fix: Evolution flips `state` to 'open' BEFORE Baileys
+    // has assigned the JID (typically a few hundred ms gap). The
+    // previous code wrote `evolution_connected_jid: null` and
+    // `status: 'connected'` on that first poll, which made the
+    // UI briefly show "Connected" with no JID — and any outbound
+    // send keyed on the JID would fail.
+    //
+    // Now we only write the "fully connected" columns (status,
+    // connected_at, evolution_connected_jid) when Evolution reports
+    // BOTH state === 'open' AND a JID. The legacy
+    // `evolution_connection_state` column always tracks the live
+    // state from Evolution — it's the source of truth and doesn't
+    // need a JID. The new `fully_connected` field on the response
+    // tells the UI which case we're in so the card can show
+    // "Connected (waiting for JID)" during the gap.
+    const hasJid = typeof status.ownerJid === 'string' && status.ownerJid.length > 0
+    const fullyConnected = isOpen && hasJid
     // Best-effort: mirror the live state onto the row.
     try {
+      const update: Record<string, unknown> = {
+        // `evolution_connection_state` reflects what Evolution
+        // just told us. 'connecting' covers the brief
+        // 'open+no-jid' window so the UI badge can show the
+        // intermediate state.
+        evolution_connection_state: fullyConnected
+          ? 'connected'
+          : isOpen
+            ? 'connecting'
+            : (status.state ?? 'disconnected'),
+        evolution_last_seen_at: fullyConnected ? new Date().toISOString() : null,
+        status: fullyConnected ? 'connected' : 'disconnected',
+        updated_at: new Date().toISOString(),
+      }
+      // Only write the JID + connected_at when we actually have
+      // a JID. Never overwrite a previously-stored JID with null
+      // (the "JID appeared then disappeared" case is rare but
+      // possible during a brief reconnect; we'd rather keep the
+      // last known JID than briefly null it out).
+      if (hasJid) {
+        update.evolution_connected_jid = status.ownerJid
+        update.connected_at = new Date().toISOString()
+      }
       await supabase
         .from('whatsapp_config')
-        .update({
-          evolution_connection_state: isOpen ? 'connected' : (status.state ?? 'disconnected'),
-          evolution_connected_jid: status.ownerJid ?? null,
-          evolution_last_seen_at: isOpen ? new Date().toISOString() : null,
-          status: isOpen ? 'connected' : 'disconnected',
-          connected_at: isOpen ? new Date().toISOString() : null,
-          updated_at: new Date().toISOString(),
-        })
+        .update(update)
         .eq('account_id', accountId)
     } catch (err) {
       console.warn(
@@ -288,10 +321,15 @@ async function handleEvolutionGet(
     }
     return NextResponse.json({
       provider: 'evolution',
+      // `connected` stays keyed on the live Evolution state so the
+      // existing UI's "Connected" badge works as before. Callers
+      // that need to distinguish "open+no-jid" from "open+jid" can
+      // use `evolution.fully_connected` below.
       connected: isOpen,
       evolution: {
         state: status.state,
         ownerJid: status.ownerJid ?? null,
+        fully_connected: fullyConnected,
         instance_name: instanceName,
         base_url: baseUrl,
       },
