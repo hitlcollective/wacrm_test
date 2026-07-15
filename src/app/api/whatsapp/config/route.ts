@@ -1,16 +1,16 @@
-import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { createClient as createAdminClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { createClient as createAdminClient } from '@supabase/supabase-js';
 import {
   registerPhoneNumber,
   subscribeWabaToApp,
   verifyPhoneNumber,
-} from '@/lib/whatsapp/meta-api'
-import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
+} from '@/lib/whatsapp/meta-api';
+import { encrypt, decrypt } from '@/lib/whatsapp/encryption';
 import {
   EvolutionLifecycleClient,
   EvolutionLifecycleError,
-} from '@/lib/whatsapp/evolution/instance-client'
+} from '@/lib/whatsapp/evolution/instance-client';
 
 /**
  * Resolve the caller's account_id from their profile. Inlined here
@@ -24,15 +24,15 @@ import {
  */
 async function resolveAccountId(
   supabase: Awaited<ReturnType<typeof createClient>>,
-  userId: string,
+  userId: string
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from('profiles')
     .select('account_id')
     .eq('user_id', userId)
-    .maybeSingle()
-  if (error || !data?.account_id) return null
-  return data.account_id as string
+    .maybeSingle();
+  if (error || !data?.account_id) return null;
+  return data.account_id as string;
 }
 
 // Lazy-initialised service-role client. We need it to detect a
@@ -40,15 +40,15 @@ async function resolveAccountId(
 // RLS, the user's own session can't see other users' rows, so the
 // conflict would be invisible without the service role.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _adminClient: any = null
+let _adminClient: any = null;
 function supabaseAdmin() {
   if (!_adminClient) {
     _adminClient = createAdminClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    )
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
   }
-  return _adminClient
+  return _adminClient;
 }
 
 /**
@@ -77,18 +77,18 @@ function supabaseAdmin() {
  */
 export async function GET() {
   try {
-    const supabase = await createClient()
+    const supabase = await createClient();
 
     const {
       data: { user },
       error: authError,
-    } = await supabase.auth.getUser()
+    } = await supabase.auth.getUser();
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(supabase, user.id);
     if (!accountId) {
       return NextResponse.json(
         {
@@ -96,20 +96,20 @@ export async function GET() {
           reason: 'no_account',
           message: 'Your profile is not linked to an account.',
         },
-        { status: 200 },
-      )
+        { status: 200 }
+      );
     }
 
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
       .select(
-        'provider, phone_number_id, access_token, status, evolution_base_url, evolution_instance_name, evolution_apikey, evolution_connection_state, evolution_connected_jid',
+        'provider, phone_number_id, access_token, status, evolution_base_url, evolution_instance_name, evolution_apikey, evolution_connection_state, evolution_connected_jid'
       )
       .eq('account_id', accountId)
-      .maybeSingle()
+      .maybeSingle();
 
     if (configError) {
-      console.error('Error fetching whatsapp_config:', configError)
+      console.error('Error fetching whatsapp_config:', configError);
       // Detect the specific PostgREST "column does not exist" /
       // "column not in schema cache" error codes. This happens
       // when the operator upgraded wacrm but forgot to apply the
@@ -124,16 +124,16 @@ export async function GET() {
       //     inside the `.message` string depending on the
       //     supabase-js version; check both.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ce: any = configError
-      const code: string | undefined = ce?.code ?? ce?.details?.code
-      const msg: string = typeof ce?.message === 'string' ? ce.message : ''
+      const ce: any = configError;
+      const code: string | undefined = ce?.code ?? ce?.details?.code;
+      const msg: string = typeof ce?.message === 'string' ? ce.message : '';
       const isSchemaError =
         code === 'PGRST204' ||
         code === '42703' ||
         msg.includes('PGRST204') ||
         msg.includes('42703') ||
         msg.includes('does not exist') ||
-        msg.includes('column')
+        msg.includes('column');
       if (isSchemaError) {
         return NextResponse.json(
           {
@@ -143,12 +143,16 @@ export async function GET() {
               'Database schema is out of date. Run supabase/migrations/027_evolution_provider.sql against your Supabase project, then restart the dev server.',
           },
           { status: 200 }
-        )
+        );
       }
       return NextResponse.json(
-        { connected: false, reason: 'db_error', message: 'Failed to fetch configuration' },
+        {
+          connected: false,
+          reason: 'db_error',
+          message: 'Failed to fetch configuration',
+        },
         { status: 200 }
-      )
+      );
     }
 
     if (!config) {
@@ -156,24 +160,25 @@ export async function GET() {
         {
           connected: false,
           reason: 'no_config',
-          message: 'No WhatsApp configuration saved yet. Fill in the form and click Save Configuration.',
+          message:
+            'No WhatsApp configuration saved yet. Fill in the form and click Save Configuration.',
         },
         { status: 200 }
-      )
+      );
     }
 
     // Dispatch on provider. New branches added in PR 2a; the
     // existing Meta branch is byte-equivalent with PR 1.
     if ((config.provider ?? 'meta') === 'evolution') {
-      return await handleEvolutionGet(supabase, accountId, config)
+      return await handleEvolutionGet(supabase, accountId, config);
     }
-    return await handleMetaGet(supabase, accountId, config)
+    return await handleMetaGet(supabase, accountId, config);
   } catch (error) {
-    console.error('Error in WhatsApp config GET:', error)
+    console.error('Error in WhatsApp config GET:', error);
     return NextResponse.json(
       { connected: false, reason: 'unknown', message: 'Internal server error' },
       { status: 500 }
-    )
+    );
   }
 }
 
@@ -181,15 +186,15 @@ async function handleMetaGet(
   supabase: Awaited<ReturnType<typeof createClient>>,
   accountId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  config: any,
+  config: any
 ) {
   // Try to decrypt the stored token with the current ENCRYPTION_KEY.
   // If this fails, the key changed (or was never consistent across envs).
-  let accessToken: string
+  let accessToken: string;
   try {
-    accessToken = decrypt(config.access_token)
+    accessToken = decrypt(config.access_token);
   } catch (err) {
-    console.error('[whatsapp/config GET] Token decryption failed:', err)
+    console.error('[whatsapp/config GET] Token decryption failed:', err);
     return NextResponse.json(
       {
         provider: 'meta',
@@ -200,7 +205,7 @@ async function handleMetaGet(
           'The stored access token cannot be decrypted with the current ENCRYPTION_KEY. This usually means the key changed, or it differs between environments (local vs Hostinger vs Vercel). Click "Reset Configuration" below, then re-save.',
       },
       { status: 200 }
-    )
+    );
   }
 
   // Validate credentials against Meta
@@ -208,15 +213,19 @@ async function handleMetaGet(
     const phoneInfo = await verifyPhoneNumber({
       phoneNumberId: config.phone_number_id,
       accessToken,
-    })
+    });
     return NextResponse.json({
       provider: 'meta',
       connected: true,
       phone_info: phoneInfo,
-    })
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown Meta API error'
-    console.error('[whatsapp/config GET] Meta API verification failed:', message)
+    const message =
+      err instanceof Error ? err.message : 'Unknown Meta API error';
+    console.error(
+      '[whatsapp/config GET] Meta API verification failed:',
+      message
+    );
     return NextResponse.json(
       {
         provider: 'meta',
@@ -225,7 +234,7 @@ async function handleMetaGet(
         message: `Meta API rejected the credentials: ${message}`,
       },
       { status: 200 }
-    )
+    );
   }
 }
 
@@ -233,11 +242,11 @@ async function handleEvolutionGet(
   supabase: Awaited<ReturnType<typeof createClient>>,
   accountId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  config: any,
+  config: any
 ) {
-  const baseUrl = config.evolution_base_url
-  const instanceName = config.evolution_instance_name
-  const globalApiKey = process.env.EVOLUTION_GLOBAL_APIKEY
+  const baseUrl = config.evolution_base_url;
+  const instanceName = config.evolution_instance_name;
+  const globalApiKey = process.env.EVOLUTION_GLOBAL_APIKEY;
 
   if (!baseUrl || !instanceName) {
     return NextResponse.json(
@@ -245,10 +254,11 @@ async function handleEvolutionGet(
         provider: 'evolution',
         connected: false,
         reason: 'incomplete_config',
-        message: 'Evolution configuration is missing the base URL or instance name.',
+        message:
+          'Evolution configuration is missing the base URL or instance name.',
       },
-      { status: 200 },
-    )
+      { status: 200 }
+    );
   }
 
   if (!globalApiKey) {
@@ -259,14 +269,14 @@ async function handleEvolutionGet(
         reason: 'server_misconfigured',
         message: 'EVOLUTION_GLOBAL_APIKEY is not set on the server.',
       },
-      { status: 200 },
-    )
+      { status: 200 }
+    );
   }
 
-  const client = new EvolutionLifecycleClient({ baseUrl, globalApiKey })
+  const client = new EvolutionLifecycleClient({ baseUrl, globalApiKey });
   try {
-    const status = await client.getStatus(instanceName)
-    const isOpen = status.state === 'open'
+    const status = await client.getStatus(instanceName);
+    const isOpen = status.state === 'open';
     // Race fix: Evolution flips `state` to 'open' BEFORE Baileys
     // has assigned the JID (typically a few hundred ms gap). The
     // previous code wrote `evolution_connected_jid: null` and
@@ -282,8 +292,9 @@ async function handleEvolutionGet(
     // need a JID. The new `fully_connected` field on the response
     // tells the UI which case we're in so the card can show
     // "Connected (waiting for JID)" during the gap.
-    const hasJid = typeof status.ownerJid === 'string' && status.ownerJid.length > 0
-    const fullyConnected = isOpen && hasJid
+    const hasJid =
+      typeof status.ownerJid === 'string' && status.ownerJid.length > 0;
+    const fullyConnected = isOpen && hasJid;
     // Best-effort: mirror the live state onto the row.
     try {
       const update: Record<string, unknown> = {
@@ -296,28 +307,30 @@ async function handleEvolutionGet(
           : isOpen
             ? 'connecting'
             : (status.state ?? 'disconnected'),
-        evolution_last_seen_at: fullyConnected ? new Date().toISOString() : null,
+        evolution_last_seen_at: fullyConnected
+          ? new Date().toISOString()
+          : null,
         status: fullyConnected ? 'connected' : 'disconnected',
         updated_at: new Date().toISOString(),
-      }
+      };
       // Only write the JID + connected_at when we actually have
       // a JID. Never overwrite a previously-stored JID with null
       // (the "JID appeared then disappeared" case is rare but
       // possible during a brief reconnect; we'd rather keep the
       // last known JID than briefly null it out).
       if (hasJid) {
-        update.evolution_connected_jid = status.ownerJid
-        update.connected_at = new Date().toISOString()
+        update.evolution_connected_jid = status.ownerJid;
+        update.connected_at = new Date().toISOString();
       }
       await supabase
         .from('whatsapp_config')
         .update(update)
-        .eq('account_id', accountId)
+        .eq('account_id', accountId);
     } catch (err) {
       console.warn(
         '[whatsapp/config GET evolution] failed to persist state:',
-        err,
-      )
+        err
+      );
     }
     return NextResponse.json({
       provider: 'evolution',
@@ -333,15 +346,15 @@ async function handleEvolutionGet(
         instance_name: instanceName,
         base_url: baseUrl,
       },
-    })
+    });
   } catch (err) {
     const message =
       err instanceof EvolutionLifecycleError
         ? err.message
         : err instanceof Error
           ? err.message
-          : 'Unknown error'
-    console.error('[whatsapp/config GET evolution] failed:', message)
+          : 'Unknown error';
+    console.error('[whatsapp/config GET evolution] failed:', message);
     return NextResponse.json(
       {
         provider: 'evolution',
@@ -349,8 +362,8 @@ async function handleEvolutionGet(
         reason: 'evolution_unreachable',
         message,
       },
-      { status: 200 },
-    )
+      { status: 200 }
+    );
   }
 }
 
@@ -366,35 +379,38 @@ async function handleEvolutionGet(
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient()
+    const supabase = await createClient();
 
     const {
       data: { user },
       error: authError,
-    } = await supabase.auth.getUser()
+    } = await supabase.auth.getUser();
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(supabase, user.id);
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
-        { status: 403 },
-      )
+        { status: 403 }
+      );
     }
 
-    const body = await request.json()
-    const provider: string = body.provider ?? 'meta'
+    const body = await request.json();
+    const provider: string = body.provider ?? 'meta';
 
     if (provider === 'evolution') {
-      return await handleEvolutionPost(supabase, accountId, user.id, body)
+      return await handleEvolutionPost(supabase, accountId, user.id, body);
     }
-    return await handleMetaPost(supabase, accountId, user.id, body)
+    return await handleMetaPost(supabase, accountId, user.id, body);
   } catch (error) {
-    console.error('Error in WhatsApp config POST:', error)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    console.error('Error in WhatsApp config POST:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
   }
 }
 
@@ -403,15 +419,15 @@ async function handleMetaPost(
   accountId: string,
   userId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  body: any,
+  body: any
 ) {
-  const { phone_number_id, waba_id, access_token, verify_token, pin } = body
+  const { phone_number_id, waba_id, access_token, verify_token, pin } = body;
 
   if (!access_token || !phone_number_id) {
     return NextResponse.json(
       { error: 'access_token and phone_number_id are required' },
       { status: 400 }
-    )
+    );
   }
 
   if (pin !== undefined && pin !== null && pin !== '') {
@@ -419,7 +435,7 @@ async function handleMetaPost(
       return NextResponse.json(
         { error: 'PIN must be exactly 6 digits.' },
         { status: 400 }
-      )
+      );
     }
   }
 
@@ -435,14 +451,14 @@ async function handleMetaPost(
     .select('account_id')
     .eq('phone_number_id', phone_number_id)
     .neq('account_id', accountId)
-    .maybeSingle()
+    .maybeSingle();
 
   if (claimedError) {
-    console.error('Error checking phone_number_id ownership:', claimedError)
+    console.error('Error checking phone_number_id ownership:', claimedError);
     return NextResponse.json(
       { error: 'Failed to validate configuration' },
       { status: 500 }
-    )
+    );
   }
 
   if (claimed) {
@@ -452,41 +468,43 @@ async function handleMetaPost(
           'This WhatsApp phone number is already linked to another account on this instance. Each phone number can only be connected to one wacrm user.',
       },
       { status: 409 }
-    )
+    );
   }
 
   // Verify credentials with Meta BEFORE saving
-  let phoneInfo
+  let phoneInfo;
   try {
     phoneInfo = await verifyPhoneNumber({
       phoneNumberId: phone_number_id,
       accessToken: access_token,
-    })
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown Meta API error'
-    console.error('Meta API verification failed during save:', message)
+    const message =
+      err instanceof Error ? err.message : 'Unknown Meta API error';
+    console.error('Meta API verification failed during save:', message);
     return NextResponse.json(
       { error: `Meta API error: ${message}` },
       { status: 400 }
-    )
+    );
   }
 
   // Encrypt sensitive tokens before storing
-  let encryptedAccessToken: string
-  let encryptedVerifyToken: string | null
+  let encryptedAccessToken: string;
+  let encryptedVerifyToken: string | null;
   try {
-    encryptedAccessToken = encrypt(access_token)
-    encryptedVerifyToken = verify_token ? encrypt(verify_token) : null
+    encryptedAccessToken = encrypt(access_token);
+    encryptedVerifyToken = verify_token ? encrypt(verify_token) : null;
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown encryption error'
-    console.error('Encryption failed:', message)
+    const message =
+      err instanceof Error ? err.message : 'Unknown encryption error';
+    console.error('Encryption failed:', message);
     return NextResponse.json(
       {
         error:
           'Failed to encrypt token. Check that ENCRYPTION_KEY is a valid 64-character hex string in your environment variables.',
       },
       { status: 500 }
-    )
+    );
   }
 
   // Look up any pre-existing row for this account so we know whether
@@ -496,11 +514,11 @@ async function handleMetaPost(
     .from('whatsapp_config')
     .select('id, registered_at, phone_number_id')
     .eq('account_id', accountId)
-    .maybeSingle()
+    .maybeSingle();
 
   const sameNumber =
     existing?.phone_number_id === phone_number_id &&
-    existing?.registered_at != null
+    existing?.registered_at != null;
 
   // Step 1: register the phone number for inbound webhooks.
   //
@@ -509,14 +527,15 @@ async function handleMetaPost(
   // when the same number is already registered and no PIN was
   // supplied — re-registering an already-active number with a
   // stale PIN would actually fail and undo the active subscription.
-  let registeredAt: string | null = existing?.registered_at ?? null
-  let registrationError: string | null = null
+  let registeredAt: string | null = existing?.registered_at ?? null;
+  let registrationError: string | null = null;
   // True when registration was deliberately skipped because no PIN
   // was supplied (see below). Distinct from registrationError — this
   // is not a failure, just an incomplete-but-valid save.
-  let registrationSkipped = false
+  let registrationSkipped = false;
 
-  const needsRegistration = !sameNumber || (typeof pin === 'string' && pin.length > 0)
+  const needsRegistration =
+    !sameNumber || (typeof pin === 'string' && pin.length > 0);
   if (needsRegistration) {
     if (!pin) {
       // No PIN provided. Meta TEST numbers (Developer Console) are
@@ -528,19 +547,19 @@ async function handleMetaPost(
       // credentials as connected, and leave registered_at null. The
       // UI surfaces a separate "Not registered" banner with a path to
       // add a PIN later for users who do need inbound webhook routing.
-      registrationSkipped = true
+      registrationSkipped = true;
     } else {
       try {
         await registerPhoneNumber({
           phoneNumberId: phone_number_id,
           accessToken: access_token,
           pin,
-        })
-        registeredAt = new Date().toISOString()
+        });
+        registeredAt = new Date().toISOString();
       } catch (err) {
         registrationError =
-          err instanceof Error ? err.message : 'Unknown Meta API error'
-        console.error('Phone number /register failed:', registrationError)
+          err instanceof Error ? err.message : 'Unknown Meta API error';
+        console.error('Phone number /register failed:', registrationError);
         // We deliberately fall through and still save the row so the
         // user can retry without re-entering everything. The UI
         // surfaces `last_registration_error` so they see WHY it's
@@ -553,17 +572,17 @@ async function handleMetaPost(
   // side, so we call on every save and persist the timestamp.
   // Skipped only when there's no waba_id (legacy rows from before
   // we required it).
-  let subscribedAppsAt: string | null = null
+  let subscribedAppsAt: string | null = null;
   if (waba_id) {
     try {
       await subscribeWabaToApp({
         wabaId: waba_id,
         accessToken: access_token,
-      })
-      subscribedAppsAt = new Date().toISOString()
+      });
+      subscribedAppsAt = new Date().toISOString();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.warn('WABA subscribed_apps failed (non-fatal):', message)
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('WABA subscribed_apps failed (non-fatal):', message);
       // Subscription failures are rare once the App has the right
       // permissions; we don't block save on them — the diagnostic
       // endpoint surfaces this state too.
@@ -585,20 +604,20 @@ async function handleMetaPost(
     subscribed_apps_at: subscribedAppsAt ?? null,
     last_registration_error: registrationError,
     updated_at: new Date().toISOString(),
-  }
+  };
 
   if (existing) {
     const { error: updateError } = await supabase
       .from('whatsapp_config')
       .update(baseRow)
-      .eq('account_id', accountId)
+      .eq('account_id', accountId);
 
     if (updateError) {
-      console.error('Error updating whatsapp_config:', updateError)
+      console.error('Error updating whatsapp_config:', updateError);
       return NextResponse.json(
         { error: 'Failed to update configuration' },
         { status: 500 }
-      )
+      );
     }
   } else {
     // Insert with both columns: `account_id` is the tenancy key
@@ -611,14 +630,14 @@ async function handleMetaPost(
         account_id: accountId,
         user_id: userId,
         ...baseRow,
-      })
+      });
 
     if (insertError) {
-      console.error('Error inserting whatsapp_config:', insertError)
+      console.error('Error inserting whatsapp_config:', insertError);
       return NextResponse.json(
         { error: 'Failed to save configuration' },
         { status: 500 }
-      )
+      );
     }
   }
 
@@ -633,7 +652,7 @@ async function handleMetaPost(
       registered: false,
       registration_error: registrationError,
       phone_info: phoneInfo,
-    })
+    });
   }
 
   return NextResponse.json({
@@ -647,7 +666,7 @@ async function handleMetaPost(
     // rather than claiming the number is fully live.
     registration_skipped: registrationSkipped,
     phone_info: phoneInfo,
-  })
+  });
 }
 
 async function handleEvolutionPost(
@@ -655,12 +674,12 @@ async function handleEvolutionPost(
   accountId: string,
   userId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  body: any,
+  body: any
 ) {
-  const baseUrl: string | undefined = body.base_url
-  const instanceName: string | undefined = body.instance_name
-  const apikey: string | undefined = body.apikey
-  const webhookSecret: string | undefined = body.webhook_secret
+  const baseUrl: string | undefined = body.base_url;
+  const instanceName: string | undefined = body.instance_name;
+  const apikey: string | undefined = body.apikey;
+  const webhookSecret: string | undefined = body.webhook_secret;
 
   if (!baseUrl || !instanceName || !apikey) {
     return NextResponse.json(
@@ -668,29 +687,30 @@ async function handleEvolutionPost(
         error:
           'base_url, instance_name, and apikey are required for provider=evolution',
       },
-      { status: 400 },
-    )
+      { status: 400 }
+    );
   }
 
   // Encrypt the apikey + (optionally) the webhook secret before
   // storing. The base URL and instance name are not sensitive
   // (the instance name is a slug Evolution itself assigned, the
   // base URL is the customer's own server).
-  let encryptedApikey: string
-  let encryptedWebhookSecret: string | null
+  let encryptedApikey: string;
+  let encryptedWebhookSecret: string | null;
   try {
-    encryptedApikey = encrypt(apikey)
-    encryptedWebhookSecret = webhookSecret ? encrypt(webhookSecret) : null
+    encryptedApikey = encrypt(apikey);
+    encryptedWebhookSecret = webhookSecret ? encrypt(webhookSecret) : null;
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown encryption error'
-    console.error('Encryption failed for Evolution config:', message)
+    const message =
+      err instanceof Error ? err.message : 'Unknown encryption error';
+    console.error('Encryption failed for Evolution config:', message);
     return NextResponse.json(
       {
         error:
           'Failed to encrypt token. Check that ENCRYPTION_KEY is a valid 64-character hex string in your environment variables.',
       },
-      { status: 500 },
-    )
+      { status: 500 }
+    );
   }
 
   const baseRow = {
@@ -722,25 +742,25 @@ async function handleEvolutionPost(
     evolution_connection_state: 'connecting' as const,
     connected_at: null,
     updated_at: new Date().toISOString(),
-  }
+  };
 
   const { data: existing } = await supabase
     .from('whatsapp_config')
     .select('id')
     .eq('account_id', accountId)
-    .maybeSingle()
+    .maybeSingle();
 
   if (existing) {
     const { error: updateError } = await supabase
       .from('whatsapp_config')
       .update(baseRow)
-      .eq('account_id', accountId)
+      .eq('account_id', accountId);
     if (updateError) {
-      console.error('Failed to update Evolution config:', updateError)
+      console.error('Failed to update Evolution config:', updateError);
       return NextResponse.json(
         { error: 'Failed to update configuration' },
-        { status: 500 },
-      )
+        { status: 500 }
+      );
     }
   } else {
     const { error: insertError } = await supabase
@@ -749,13 +769,13 @@ async function handleEvolutionPost(
         account_id: accountId,
         user_id: userId,
         ...baseRow,
-      })
+      });
     if (insertError) {
-      console.error('Failed to insert Evolution config:', insertError)
+      console.error('Failed to insert Evolution config:', insertError);
       return NextResponse.json(
         { error: 'Failed to save configuration' },
-        { status: 500 },
-      )
+        { status: 500 }
+      );
     }
   }
 
@@ -767,7 +787,7 @@ async function handleEvolutionPost(
       base_url: baseUrl,
       instance_name: instanceName,
     },
-  })
+  });
 }
 
 /**
@@ -784,41 +804,44 @@ async function handleEvolutionPost(
  */
 export async function DELETE() {
   try {
-    const supabase = await createClient()
+    const supabase = await createClient();
 
     const {
       data: { user },
       error: authError,
-    } = await supabase.auth.getUser()
+    } = await supabase.auth.getUser();
 
     if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(supabase, user.id);
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
-        { status: 403 },
-      )
+        { status: 403 }
+      );
     }
 
     const { error: deleteError } = await supabase
       .from('whatsapp_config')
       .delete()
-      .eq('account_id', accountId)
+      .eq('account_id', accountId);
 
     if (deleteError) {
-      console.error('Error deleting whatsapp_config:', deleteError)
+      console.error('Error deleting whatsapp_config:', deleteError);
       return NextResponse.json(
         { error: 'Failed to delete configuration' },
         { status: 500 }
-      )
+      );
     }
 
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error in WhatsApp config DELETE:', error)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    console.error('Error in WhatsApp config DELETE:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
   }
 }
