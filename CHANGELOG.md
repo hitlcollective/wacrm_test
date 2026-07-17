@@ -240,6 +240,31 @@ Apply against your Supabase project before deploying this version:
   `phone_normalized`, and the index is what enforces de-duplication
   for every write path. The one-shot merge runs inside the migration.
 
+### Fixed
+
+- **Evolution: defer the 'connected' state until Evolution reports a
+  JID.** `GET /api/whatsapp/config` previously flipped `status` to
+  `'connected'` the moment Evolution's `state` went `'open'`, which
+  races Baileys's JID assignment by a few hundred ms. During that gap
+  the UI flashed a "Connected" state with no JID, and any outbound
+  send keyed on the JID could fail. The route now writes
+  `status='connected'` only when both `state === 'open'` AND
+  `ownerJid` is non-empty; the row's `evolution_connection_state`
+  reflects `'connecting'` during the gap so the UI can render the
+  transient state distinctly. The GET response carries a new
+  `evolution.fully_connected` flag for callers that need to tell the
+  two apart.
+
+### Changed (Internal)
+
+- **Evolution connect card: state machine moved to a `useReducer`
+  with an explicit transition table.** Replaces a hand-maintained
+  `useState<ConnectionState>` whose illegal transitions (e.g.
+  `pairing → connected` skipping the save step) were silent bugs in
+  waiting. The reducer is exhaustive over (state, action); illegal
+  dispatches are no-ops with a `console.warn`. No user-visible
+  behavior change.
+
 ## [0.2.2] — 2026-05-29
 
 Flow nodes can now send media. Closes the most-requested gap from user
