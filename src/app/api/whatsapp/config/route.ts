@@ -342,6 +342,15 @@ async function handleEvolutionGet(
       evolution: {
         state: status.state,
         ownerJid: status.ownerJid ?? null,
+        // Distinguishes `state === 'open' && hasJid` (the DB row is
+        // fully connected and outbound sends will succeed) from
+        // `state === 'open' && !hasJid` (the brief Baileys race
+        // window — Evolution reports 'open' before the JID is
+        // assigned). The current Evolution connect card reads the
+        // DB row directly via Supabase and doesn't consume this
+        // flag; it's exposed here so any future route-based caller
+        // can render the transient state without re-fetching the
+        // row.
         fully_connected: fullyConnected,
         instance_name: instanceName,
         base_url: baseUrl,

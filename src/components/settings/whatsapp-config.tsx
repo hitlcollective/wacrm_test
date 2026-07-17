@@ -184,7 +184,7 @@ export function WhatsAppConfig() {
   // default to Meta.
   useEffect(() => {
     if (config) {
-      setSelectedProvider(((config as any).provider ?? 'meta') as Provider)
+      setSelectedProvider((config.provider ?? 'meta') as Provider)
     }
   }, [config])
 
@@ -194,7 +194,7 @@ export function WhatsAppConfig() {
   // default to Meta.
   useEffect(() => {
     if (config) {
-      setSelectedProvider(((config as any).provider ?? 'meta') as Provider)
+      setSelectedProvider((config.provider ?? 'meta') as Provider)
     }
   }, [config])
 
@@ -407,7 +407,7 @@ export function WhatsAppConfig() {
     if (next === selectedProvider) return
     const other = next === 'meta' ? 'evolution' : 'meta'
     const hasOther =
-      config && ((config as any).provider ?? 'meta') === other
+      config && (config.provider ?? 'meta') === other
     if (hasOther) {
       const label = other === 'meta' ? 'Meta' : 'Evolution'
       const ok = confirm(

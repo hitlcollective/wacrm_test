@@ -414,31 +414,42 @@ export function EvolutionConnectCard() {
   // ============================================================
 
   // Already connected — show the connected view, no input.
-  //
-  // The `any` casts here are for the *evolution-specific*
-  // columns that the shared WhatsAppConfigType doesn't expose.
-  // The migration 027_evolution_provider.sql added these
-  // columns to whatsapp_config but they're not in the typed
-  // shape yet (that's a follow-up).
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  if (existing && (existing as any).provider === 'evolution') {
-    const evolutionState = (existing as any).evolution_connection_state as
-      | string
-      | null;
-    const evolutionJid = (existing as any).evolution_connected_jid as
-      | string
-      | null;
-    const instanceName = (existing as any).evolution_instance_name as
-      | string
-      | null;
-    /* eslint-enable @typescript-eslint/no-explicit-any */
+  if (existing && existing.provider === 'evolution') {
+    const evolutionState = existing.evolution_connection_state;
+    const evolutionJid = existing.evolution_connected_jid;
+    const instanceName = existing.evolution_instance_name;
+    // Transient state between Evolution reporting `state === 'open'`
+    // and Baileys assigning the JID. The route reflects this via
+    // `evolution_connection_state = 'connecting'`; render the alert
+    // in amber with a spinner and suppress the Disconnect button
+    // (the instance IS paired — tearing it down would force the
+    // operator to re-scan the QR).
+    const isConnecting = evolutionState === 'connecting';
     return (
       <div className="space-y-6">
-        <Alert className="border-emerald-700/50 bg-emerald-950/30">
+        <Alert
+          className={
+            isConnecting
+              ? 'border-amber-700/50 bg-amber-950/30'
+              : 'border-emerald-700/50 bg-emerald-950/30'
+          }
+        >
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="size-4 text-emerald-400" />
-            <AlertTitle className="mb-0 text-emerald-200">
-              Connected via Evolution
+            {isConnecting ? (
+              <Loader2 className="size-4 animate-spin text-amber-400" />
+            ) : (
+              <CheckCircle2 className="size-4 text-emerald-400" />
+            )}
+            <AlertTitle
+              className={
+                isConnecting
+                  ? 'mb-0 text-amber-200'
+                  : 'mb-0 text-emerald-200'
+              }
+            >
+              {isConnecting
+                ? 'Connected — waiting for WhatsApp to assign a number'
+                : 'Connected via Evolution'}
             </AlertTitle>
           </div>
           <AlertDescription className="text-muted-foreground text-sm">
@@ -453,10 +464,10 @@ export function EvolutionConnectCard() {
           <CardHeader>
             <CardTitle className="text-foreground">Connection status</CardTitle>
             <CardDescription className="text-muted-foreground">
-              {evolutionState === 'connected'
-                ? 'WhatsApp is paired and receiving events.'
-                : evolutionState === 'connecting'
-                  ? 'Instance is connecting. Reload in a few seconds.'
+              {isConnecting
+                ? 'Phone is paired; waiting for WhatsApp to assign a JID. This usually settles in under a second.'
+                : evolutionState === 'connected'
+                  ? 'WhatsApp is paired and receiving events.'
                   : evolutionState === 'disconnected'
                     ? 'Instance is currently disconnected. Refresh to see if it reconnects.'
                     : 'Connection state is unknown. Click Test to refresh.'}
@@ -477,14 +488,19 @@ export function EvolutionConnectCard() {
                 )}
                 {reRegistering ? 'Re-registering…' : 'Re-register webhook'}
               </Button>
-              <Button
-                variant="outline"
-                onClick={handleDisconnect}
-                className="border-red-900 text-red-400 hover:bg-red-950/40 hover:text-red-300"
-              >
-                <PowerOff className="size-4" />
-                Disconnect Evolution
-              </Button>
+              {/* Hidden during the brief 'connecting' window: the
+                  instance is paired, and disconnecting would force
+                  the operator to re-scan the QR. */}
+              {!isConnecting && (
+                <Button
+                  variant="outline"
+                  onClick={handleDisconnect}
+                  className="border-red-900 text-red-400 hover:bg-red-950/40 hover:text-red-300"
+                >
+                  <PowerOff className="size-4" />
+                  Disconnect Evolution
+                </Button>
+              )}
             </div>
             <p className="text-muted-foreground mt-3 text-xs leading-relaxed">
               If inbound messages stopped arriving after a server move or env

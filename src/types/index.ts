@@ -205,25 +205,83 @@ export interface MessageReaction {
   created_at: string;
 }
 
+/**
+ * `whatsapp_config` row, as the UI sees it.
+ *
+ * After migration 027 the table is account-scoped (one row per
+ * `account_id`) and carries a `provider` discriminator plus a
+ * set of Evolution-specific columns. We keep this shape as a
+ * single superset (every column nullable) rather than a
+ * discriminated union because both the Meta and Evolution
+ * settings UIs read fields off the same `config` object and
+ * branch on `provider` at render time. The schema's actual
+ * columns are defined by `supabase/migrations/027_evolution_provider.sql`;
+ * if you change one, change the matching field here.
+ *
+ * The fully-typed "row everything the route can return" view
+ * lives at `src/lib/whatsapp/providers/index.ts:WhatsAppConfigRow`;
+ * this interface is the UI-facing subset.
+ */
 export interface WhatsAppConfig {
   id: string;
-  user_id: string;
-  phone_number_id: string;
-  waba_id?: string;
-  access_token: string;
-  verify_token?: string;
-  status: 'connected' | 'disconnected';
-  connected_at?: string;
+  /** Account that owns this config. Post-migration 027 the table is
+   *  UNIQUE(account_id); pre-migration it was UNIQUE(user_id). */
+  account_id: string;
+  /** Legacy column. Post-migration 027 the row belongs to an account;
+   *  `user_id` stays on every row for assignment / audit. */
+  user_id?: string;
+
+  /** Provider discriminator. Defaults to `'meta'` for rows written
+   *  before migration 027 (handled by `(config.provider ?? 'meta')` at
+   *  the read site). */
+  provider?: 'meta' | 'evolution';
+
+  // Meta-only
+  phone_number_id?: string | null;
+  waba_id?: string | null;
+  access_token?: string | null;
+  verify_token?: string | null;
+  status?: 'connected' | 'disconnected' | null;
+  connected_at?: string | null;
   /**
    * Set when POST /{phone_number_id}/register last succeeded. NULL
    * means the number was saved but never actually subscribed for
    * webhooks on Meta's side — inbound events will be silently lost.
    */
-  registered_at?: string;
+  registered_at?: string | null;
   /** Set when POST /{waba_id}/subscribed_apps last succeeded. */
-  subscribed_apps_at?: string;
+  subscribed_apps_at?: string | null;
   /** Last error from /register; cleared on success. */
-  last_registration_error?: string;
+  last_registration_error?: string | null;
+
+  // Evolution-only (migration 027). All nullable: a Meta row has
+  // them all NULL, an Evolution row has most populated.
+  evolution_base_url?: string | null;
+  evolution_instance_name?: string | null;
+  evolution_apikey?: string | null;
+  evolution_webhook_url_secret?: string | null;
+  /**
+   * 5-value text enum mirrored from Evolution's own state machine,
+   * plus a local 'connecting' value for the brief open-but-no-JID
+   * window (see `route.ts` for `handleEvolutionGet`). The route
+   * reflects this column on every Evolution status poll; the UI
+   * reads it from the row to render the connecting/connected/
+   * disconnected banner.
+   */
+  evolution_connection_state?:
+    | 'qr_pending'
+    | 'connected'
+    | 'disconnected'
+    | 'banned'
+    | 'connecting'
+    | null;
+  evolution_connected_jid?: string | null;
+  evolution_last_seen_at?: string | null;
+  evolution_last_disconnect_reason?: string | null;
+
+  // Timestamps
+  created_at?: string;
+  updated_at?: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)
